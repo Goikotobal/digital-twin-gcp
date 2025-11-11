@@ -1,0 +1,33 @@
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+terraform.tfvars
+*.tfvars
+crash.log
+override.tf
+
+# GCP
+*.json
+key.json
+service-account*.json
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+env/
+function.zip
+package/
+
+# Node
+node_modules/
+dist/
+.env
+
+# IDE
+.vscode/
+*.swp
+
+# OS
+.DS_Store

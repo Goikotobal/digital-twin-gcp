@@ -1,0 +1,119 @@
+import functions_framework
+import json
+import os
+from google.cloud import storage
+from anthropic import Anthropic
+
+# Initialize clients
+storage_client = storage.Client()
+anthropic_client = Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY', ''))
+
+MEMORY_BUCKET = os.environ.get('MEMORY_BUCKET', '')
+BEDROCK_MODEL_ID = os.environ.get('BEDROCK_MODEL_ID', 'claude-3-sonnet-20240229')
+
+@functions_framework.http
+def chat_handler(request):
+    """HTTP Cloud Function for chat endpoint."""
+    
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        headers = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type',
+            'Access-Control-Max-Age': '3600'
+        }
+        return ('', 204, headers)
+
+    headers = {
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': 'application/json'
+    }
+
+    try:
+        # Parse request
+        request_json = request.get_json(silent=True)
+        if not request_json:
+            return (json.dumps({'error': 'Invalid JSON'}), 400, headers)
+
+        user_message = request_json.get('message', '')
+        session_id = request_json.get('sessionId', 'default')
+
+        if not user_message:
+            return (json.dumps({'error': 'Message is required'}), 400, headers)
+
+        # Get conversation history
+        conversation_history = get_conversation_history(session_id)
+
+        # Add user message
+        conversation_history.append({
+            'role': 'user',
+            'content': user_message
+        })
+
+        # Call Anthropic API
+        try:
+            response = anthropic_client.messages.create(
+                model=BEDROCK_MODEL_ID,
+                max_tokens=1024,
+                messages=conversation_history
+            )
+            assistant_message = response.content[0].text
+        except Exception as e:
+            print(f"Anthropic API error: {str(e)}")
+            assistant_message = f"I apologize, but I encountered an error: {str(e)}"
+
+        # Add assistant response
+        conversation_history.append({
+            'role': 'assistant',
+            'content': assistant_message
+        })
+
+        # Save history
+        save_conversation_history(session_id, conversation_history)
+
+        return (json.dumps({
+            'response': assistant_message,
+            'sessionId': session_id
+        }), 200, headers)
+
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return (json.dumps({
+            'error': 'Internal server error',
+            'details': str(e)
+        }), 500, headers)
+
+
+def get_conversation_history(session_id):
+    """Retrieve conversation history from Cloud Storage."""
+    if not MEMORY_BUCKET:
+        return []
+
+    try:
+        bucket = storage_client.bucket(MEMORY_BUCKET)
+        blob = bucket.blob(f'conversations/{session_id}.json')
+        
+        if blob.exists():
+            content = blob.download_as_text()
+            return json.loads(content)
+        return []
+    except Exception as e:
+        print(f"Error retrieving history: {str(e)}")
+        return []
+
+
+def save_conversation_history(session_id, history):
+    """Save conversation history to Cloud Storage."""
+    if not MEMORY_BUCKET:
+        return
+
+    try:
+        bucket = storage_client.bucket(MEMORY_BUCKET)
+        blob = bucket.blob(f'conversations/{session_id}.json')
+        blob.upload_from_string(
+            json.dumps(history),
+            content_type='application/json'
+        )
+    except Exception as e:
+        print(f"Error saving history: {str(e)}")
