@@ -1,65 +1,58 @@
-import functions_framework
-import json
+from flask import Flask, request, jsonify
 import os
-import urllib.request
-import urllib.parse
+import openai
 
-@functions_framework.http
-def chat_handler(request):
-    """Ultra-simple chat handler using direct HTTP calls."""
-    
-    # CORS
-    if request.method == 'OPTIONS':
-        return ('', 204, {
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'POST, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type',
-        })
+app = Flask(__name__)
 
-    headers_out = {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
-    }
+# Load API Key securely
+openai_api_key = os.environ.get("OPENAI_API_KEY")
+if not openai_api_key:
+    raise RuntimeError("OPENAI_API_KEY environment variable not set.")
+openai.api_key = openai_api_key
+
+@app.route("/", methods=["POST", "OPTIONS"])
+def chat_handler():
+    if request.method == "OPTIONS":
+        return _cors_response({"status": "ok"}, 204)
 
     try:
-        request_json = request.get_json(silent=True)
-        if not request_json:
-            return (json.dumps({'error': 'Invalid JSON'}), 400, headers_out)
+        data = request.get_json()
+        message = data.get("message", "")
+        session_id = data.get("sessionId", "default")
 
-        user_message = request_json.get('message', '')
-        
-        if not user_message:
-            return (json.dumps({'error': 'Message required'}), 400, headers_out)
+        if not message:
+            return _cors_response({"error": "Message required"}, 400)
 
-        # Call Anthropic API directly via HTTP
-        api_key = os.environ.get('ANTHROPIC_API_KEY', '')
-        
-        data = {
-            "model": "claude-3-sonnet-20240229",
-            "max_tokens": 1024,
-            "messages": [{"role": "user", "content": user_message}]
-        }
-        
-        req = urllib.request.Request(
-            'https://api.anthropic.com/v1/messages',
-            data=json.dumps(data).encode('utf-8'),
-            headers={
-                'Content-Type': 'application/json',
-                'anthropic-version': '2023-06-01',
-                'x-api-key': api_key
-            }
+        completion = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": message}
+            ],
+            max_tokens=100
         )
-        
-        with urllib.request.urlopen(req) as response:
-            result = json.loads(response.read().decode('utf-8'))
-            assistant_message = result['content'][0]['text']
-        
-        return (json.dumps({
-            'response': assistant_message,
-            'sessionId': request_json.get('sessionId', 'default')
-        }), 200, headers_out)
 
-    except Exception as e:
-        return (json.dumps({
-            'error': f'Error: {str(e)}'
-        }), 500, headers_out)
+        assistant_message = completion.choices[0].message.content
+
+        return _cors_response({
+            "response": assistant_message,
+            "sessionId": session_id
+        })
+
+    except Exception as ex:
+        return _cors_response({"error": f"Error: {str(ex)}"}, 500)
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "healthy"}), 200
+
+def _cors_response(data, status=200):
+    response = jsonify(data)
+    response.status_code = status
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return response
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))

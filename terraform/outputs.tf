@@ -1,6 +1,6 @@
 output "function_url" {
-  description = "URL of the Cloud Function API"
-  value       = google_cloudfunctions_function.api.https_trigger_url
+  description = "URL of the Cloud Run service"
+  value       = google_cloud_run_v2_service.api.uri
 }
 
 output "frontend_bucket_name" {

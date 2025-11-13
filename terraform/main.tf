@@ -52,55 +52,77 @@ resource "google_storage_bucket_iam_member" "frontend_public" {
   member = "allUsers"
 }
 
-# Storage bucket for Cloud Function source code
-resource "google_storage_bucket" "function_source" {
-  name          = "${local.name_prefix}-function-source-${data.google_project.current.number}"
+# Artifact Registry repository for Docker images
+resource "google_artifact_registry_repository" "repo" {
   location      = var.region
-  force_destroy = true
-  
-  uniform_bucket_level_access = true
+  repository_id = "${local.name_prefix}-repo"
+  format        = "DOCKER"
   
   labels = local.common_labels
 }
 
-# Upload function source
-resource "google_storage_bucket_object" "function_source" {
-  name   = "function-${var.environment}-source.zip"
-  bucket = google_storage_bucket.function_source.name
-  source = "${path.module}/../backend/function.zip"
+# Build and push Docker image
+resource "null_resource" "docker_build" {
+  triggers = {
+    dockerfile_hash = filemd5("${path.module}/../backend/Dockerfile")
+    main_py_hash    = filemd5("${path.module}/../backend/main.py")
+    requirements_hash = filemd5("${path.module}/../backend/requirements.txt")
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      cd ${path.module}/../backend
+      gcloud builds submit \
+        --tag ${var.region}-docker.pkg.dev/${data.google_project.current.project_id}/${google_artifact_registry_repository.repo.name}/${var.project_name}:latest \
+        --project ${data.google_project.current.project_id}
+    EOT
+  }
+
+  depends_on = [google_artifact_registry_repository.repo]
 }
 
-# Cloud Function (Gen 1) - Much simpler and more stable
-resource "google_cloudfunctions_function" "api" {
-  name        = "${local.name_prefix}-api"
-  description = "Digital Twin API"
-  runtime     = "python39"
-  region      = var.region
+# Cloud Run service
+resource "google_cloud_run_v2_service" "api" {
+  name     = "${local.name_prefix}-api"
+  location = var.region
 
-  available_memory_mb   = var.function_memory
-  timeout               = var.function_timeout
-  entry_point           = "chat_handler"
-  
-  source_archive_bucket = google_storage_bucket.function_source.name
-  source_archive_object = google_storage_bucket_object.function_source.name
-
-  trigger_http = true
-
-  environment_variables = {
-    MEMORY_BUCKET     = google_storage_bucket.memory.name
-    BEDROCK_MODEL_ID  = var.claude_model
-    ANTHROPIC_API_KEY = var.anthropic_api_key
-    ENVIRONMENT       = var.environment
+  template {
+    containers {
+      image = "${var.region}-docker.pkg.dev/${data.google_project.current.project_id}/${google_artifact_registry_repository.repo.name}/${var.project_name}:latest"
+      
+      env {
+        name  = "ANTHROPIC_API_KEY"
+        value = var.anthropic_api_key
+      }
+      
+      env {
+        name  = "ENVIRONMENT"
+        value = var.environment
+      }
+      
+      resources {
+        limits = {
+          cpu    = "1"
+          memory = "512Mi"
+        }
+      }
+    }
+    
+    scaling {
+      min_instance_count = 0
+      max_instance_count = 10
+    }
   }
 
   labels = local.common_labels
+
+  depends_on = [null_resource.docker_build]
 }
 
-# Make Cloud Function publicly accessible
-resource "google_cloudfunctions_function_iam_member" "invoker" {
-  project        = google_cloudfunctions_function.api.project
-  region         = google_cloudfunctions_function.api.region
-  cloud_function = google_cloudfunctions_function.api.name
-  role           = "roles/cloudfunctions.invoker"
-  member         = "allUsers"
+# Make Cloud Run service publicly accessible
+resource "google_cloud_run_service_iam_member" "public" {
+  service  = google_cloud_run_v2_service.api.name
+  location = google_cloud_run_v2_service.api.location
+  role     = "roles/run.invoker"
+  member   = "allUsers"
 }
